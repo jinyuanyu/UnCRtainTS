@@ -12,6 +12,7 @@
     Pre-computed statistics can be imported via the dataloader's "import_data_path" argument.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -45,28 +46,56 @@ g.manual_seed(seed)
 
 pathify = lambda path_list: [os.path.join(*path[0].split('/')[-6:]) for path in path_list]
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Pre-compute cloud coverage statistics for SEN12MS-CR-TS.")
+    parser.add_argument("--root", default="/home/data/SEN12MSCRTS", help="SEN12MS-CR-TS根目录")
+    parser.add_argument("--split", default="test", choices=["all", "train", "val", "test"], help="数据划分")
+    parser.add_argument("--region", default="all", choices=["all", "africa", "america", "asiaEast", "asiaWest", "europa"], help="数据区域")
+    parser.add_argument("--sample-type", dest="sample_type", default="generic", choices=["generic", "cloudy_cloudfree"], help="采样类型")
+    parser.add_argument("--input-t", dest="input_t", type=int, default=3, help="输入时间点数量")
+    parser.add_argument("--import-data-path", dest="import_data_path", default=None, help="预加载索引文件路径")
+    parser.add_argument("--export-data-path", dest="export_data_path", default=os.path.join(dirname, "precomputed"), help="导出预计算文件目录或文件路径，设为''关闭导出")
+    parser.add_argument("--vary", default=None, choices=["random", "fixed"], help="是否在不同epoch随机重采样")
+    parser.add_argument("--n-epochs", dest="n_epochs", type=int, default=None, help="预计算轮数，默认依据vary和sample_type推断")
+    parser.add_argument("--max-samples", dest="max_samples", type=int, default=int(1e9), help="最多采样的patch数量")
+    parser.add_argument("--num-workers", dest="num_workers", type=int, default=0, help="DataLoader并行worker数量")
+    parser.add_argument("--shuffle", action="store_true", help="是否打乱DataLoader顺序（导出索引时会被强制关闭）")
+    parser.add_argument("--seed", type=int, default=1, help="随机种子")
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
-    # main parameters for instantiating SEN12MS-CR-TS
-    root                = '/home/data/SEN12MSCRTS'                              # path to your copy of SEN12MS-CR-TS
-    split               = 'test'                                                # ROI to sample from, belonging to splits [all | train | val | test]
-    input_t             = 3                                                     # number of input time points to sample (irrelevant if choosing sample_type='generic')
-    region              = 'all'                                                 # choose the region of data input. [all | africa | america | asiaEast | asiaWest | europa]
-    sample_type         = 'generic'                                             # type of samples returned [cloudy_cloudfree | generic]
-    import_data_path    = None                                                  # path to importing the suppl. file specifying what time points to load for input and output, e.g. os.path.join(os.getcwd(), 'util', '3_test_s2cloudless_mask.npy')
-    export_data_path    = os.path.join(dirname, 'precomputed')                  # e.g. ...'/3_all_train_vary_s2cloudless_mask.npy'
-    vary                = 'random' if split!='test' else 'fixed'                # whether to vary samples across epoch or not
-    n_epochs            = 1 if vary=='fixed' or sample_type=='generic' else 30  # if not varying dates across epochs, then a single epoch is sufficient
-    max_samples         = int(1e9)
+    args = parse_args()
 
-    shuffle             = False
-    if export_data_path is not None:                # if exporting data indices to file then need to disable DataLoader shuffling, else pdx are not sorted (they may still be shuffled when importing)
-        shuffle = False                             # ---for importing, shuffling may change the order from that of the exported file (which may or may not be desired)
+    # 更新随机种子
+    seed = args.seed
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    g.manual_seed(seed)
 
-    sen12mscrts         = SEN12MSCRTS(root, split=split, sample_type=sample_type, n_input_samples=input_t, region=region, sampler=vary, import_data_path=import_data_path)
+    split = args.split
+    sample_type = args.sample_type
+    input_t = args.input_t
+    region = args.region
+    import_data_path = args.import_data_path
+
+    export_data_path = args.export_data_path if args.export_data_path else None
+    if export_data_path:
+        # 如果传入的是目录则直接创建；如果是文件则创建其父目录
+        target_dir = export_data_path if not export_data_path.endswith('.npy') else os.path.dirname(export_data_path) or '.'
+        os.makedirs(target_dir, exist_ok=True)
+    vary = args.vary if args.vary is not None else ('random' if split != 'test' else 'fixed')
+    n_epochs = args.n_epochs if args.n_epochs is not None else (1 if vary == 'fixed' or sample_type == 'generic' else 30)
+    max_samples = args.max_samples
+
+    shuffle = args.shuffle and export_data_path is None  # 导出索引时保持顺序
+
+    sen12mscrts = SEN12MSCRTS(args.root, split=split, sample_type=sample_type, n_input_samples=input_t, region=region, sampler=vary, import_data_path=import_data_path)
     # instantiate dataloader, note: worker_init_fn is needed to get reproducible random samples across runs if vary_samples=True
     # note: if using 'export_data_path' then keep batch_size at 1 (unless moving data writing out of dataloader)
     #                                   and shuffle=False (processes patches in order, but later imports can still shuffle this)
-    dataloader          = torch.utils.data.DataLoader(sen12mscrts, batch_size=1, shuffle=shuffle, worker_init_fn=seed_worker, generator=g, num_workers=0)
+    dataloader = torch.utils.data.DataLoader(sen12mscrts, batch_size=1, shuffle=shuffle, worker_init_fn=seed_worker, generator=g, num_workers=args.num_workers)
     
     if export_data_path is not None: 
         data_pairs  = {}  # collect pre-computed dates in a dict to be exported
